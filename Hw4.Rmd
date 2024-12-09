@@ -1,0 +1,210 @@
+---
+title: "Homework 4"
+author: "Jason Clark"
+output: html_document
+date: "`r Sys.Date()`"
+---
+```{r, echo = FALSE}
+knitr::opts_chunk$set(warnings = FALSE, message = FALSE)
+```
+
+```{r}
+## Load Packages
+library("dplyr")
+library("ggplot2")
+library("stringr")
+library("tidyr")
+library("tidytext")
+library("topicmodels")
+library("patchwork")
+library("keras")
+library("purrr")
+```
+
+# Overview
+My data set for this homework is sourced from Amazon reviews and contains a "Text" column of customer reviews, as well as a "label" column in which the review was judged to be positive (1) or negative (0). Though it is not described as such, the data seems to be exclusively reviewing phone apps. The data is licensed by MIT: https://www.kaggle.com/datasets/mahmudulhaqueshawon/amazon-product-reviews
+
+```{r}
+reviews=read.csv("https://raw.githubusercontent.com/jasonjclark/stat436HW4/refs/heads/main/amazon.csv") 
+```
+
+I wanted to use topic modeling in order to categorize the reviews based on word usage in order to see what terms were commonly associated with positive vs. negative reviews. The visualizations are divided into two sections because my first attempt yielded no meaningful results ("Preliminary Attempt" section), so I had to try different methods ("Final Visualizations" section).
+
+# Preliminary Attempt
+My conclusion from my original attempt at using Topic Modeling to decipher between positive and negative reviews is that this problem is more complex than I expected, especially due to the fact that both positive and negative reviews may use similar terms: ("great GAME" vs "bad GAME"). It seems that the dominant words in both positive and negative reviews were quite similar. If you wish to see some exploratory analysis as well as methodology adaptations, you can follow through some of my attempts at fixing this issue, if not, skip to the "Final Visualizations" section.
+
+### Data Processing
+One of my first attempts at yielding better results was focused on balancing the data set. The original data has far more positive reviews than negative ones. So in an attempt to avoid focusing too much on the positive reviews I created "balanced_reviews" which is 50% positive, and 50% negative.
+```{r}
+pos_reviews=reviews %>% filter(label == 1)
+neg_reviews=reviews %>% filter(label == 0)
+
+#######USED GPT TO HELP CREATE A BALANCED DATASET#######
+pos_sample <- pos_reviews %>% sample_n(nrow(neg_reviews))
+
+balanced_reviews <- bind_rows(pos_sample, neg_reviews)
+########################################################
+```
+
+### Model Setup and Fit
+Another issue I encountered was that even after removing stopwords, the most common words within every topic were basic, neutral words such as "app", "game" or "phone" that would be contained in almost all reviews. I created a custom stop words list to eliminate neutral words that appeared in almost all topics. 
+```{r}
+#Creating D-T Matrix
+custom_stopwords=tibble(word = c("app","game","phone","apps","games","download","kindle","amazon","downloaded","time","play"))
+
+word_counts=balanced_reviews %>%
+  mutate(document = row_number()) %>%
+  unnest_tokens(word, Text) %>%
+  anti_join(stop_words, by = "word") %>%
+  anti_join(custom_stopwords, by = "word") %>%
+  count(document, word)
+
+reviews_dtm=word_counts %>%
+  cast_dtm(document, word, n)
+
+reviews_dtm
+```
+
+Another debugging strategy I used was trying many different k values for the number of topics to be included, none yielded topics with a significant disparity towards positivity or negativity.
+```{r}
+#Model Fit
+k=4 #TRIED MANY DIFFERENT # OF TOPICS
+reviews_lda=LDA(reviews_dtm, k = k, control = list(seed = 1234))
+```
+
+```{r}
+#Get Beta and Gamma
+beta=tidy(reviews_lda, matrix = "beta")
+gamma=tidy(reviews_lda, matrix = "gamma")
+```
+
+### Visualization 1
+Displaying the top words per topic, this visualization showed me that the top words were almost always positive no matter how I altered the pre-processing/model-fit.
+```{r}
+#Visualize the Top Words For Each Topic
+top_terms=beta %>%
+  group_by(topic) %>%
+  slice_max(beta, n = 10) %>%
+  ungroup()
+
+top_terms %>%
+  mutate(term = reorder_within(term, beta, topic)) %>%
+  ggplot(aes(x = term, y = beta, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free_y") +
+  scale_x_reordered() +
+  labs(
+    title = "Top Terms per Topic",
+    x = "Term",
+    y = "Beta"
+  ) +
+  coord_flip()
+```
+
+### Visualization 2
+This visualization was what I was really hoping would be altered by my attempts to alter the modeling process. I was hoping to get topics with a significant tendency towards positive or towards negative reviews but would end up with an even distribution each time. 
+```{r}
+#Show proportion of positive vs negative reviews in each topic
+reviews_doc_topics=gamma%>%
+  mutate(document = as.integer(document)) %>%
+  left_join(reviews %>% mutate(document = row_number()), by = "document")
+
+topic_by_label=reviews_doc_topics %>%
+  group_by(label, topic) %>%
+  summarize(avg_gamma = mean(gamma), .groups = "drop")
+
+topic_by_label %>%
+  ggplot(aes(x = factor(topic), y = avg_gamma, fill = factor(label))) +
+  geom_col(position = "dodge", color = "black") +
+  labs(
+    title = "Topic Proportions by Sentiment Label",
+    x = "Topic",
+    y = "Average Topic Proportion",
+    fill = "Label"
+  )
+```
+
+# Final Visualizations
+After messing with the data going into those two visualizations for a while, I concluded that an unsupervised model such as LDA was not going to divide up topics exactly as I had hoped, especially when so many reviews contained similar verbiage. But I still wanted to answer my original question of what terms were associated with positive vs negative reviews, so I decided to divide up the reviews by the label column myself. 
+
+My idea was to use only the first visualization (Top Terms by Topic) but to create two different versions, one for positive reviews and one for negative reviews. The second visualization (Topic Proportions by Sentiment Label), would not be useful in this case as we will be working on data only pertaining to one label at a time now. 
+
+### Functions
+I created two functions to improve modularity as I was going to repeat the same code for both positive and negative reviews.
+```{r}
+##Data Processing/Model Fit
+fit <- function(data, k){
+  #Custom StopWords
+  custom_stopwords=tibble(word = c("app","game","phone","apps","games","download","kindle","amazon","downloaded","time","play","android","free","1","5","quot"))
+  
+  #Creating D-T Matrix
+  word_counts=data %>%
+    mutate(document = row_number()) %>%
+    unnest_tokens(word, Text) %>%
+    anti_join(stop_words, by = "word") %>%
+    anti_join(custom_stopwords, by = "word") %>%
+    count(document, word)
+  
+  reviews_dtm=word_counts %>%
+    cast_dtm(document, word, n)
+
+  #Model Fit
+  reviews_lda=LDA(reviews_dtm, k = k, control = list(seed = 1234))
+  
+  #Get Beta
+  beta=tidy(reviews_lda, matrix = "beta")
+  
+  return(beta)
+}
+```
+
+```{r}
+## Create visualization of data
+viz <- function(beta, subtitle_str){
+  #Visualize the Top Words For Each Topic
+  top_terms=beta %>%
+    group_by(topic) %>%
+    slice_max(beta, n = 5) %>%
+    ungroup()
+  
+  plot=top_terms %>%
+    mutate(term = reorder_within(term, beta, topic)) %>%
+    ggplot(aes(x = term, y = beta, fill = factor(topic))) +
+    geom_col(show.legend = FALSE) +
+    facet_wrap(~ topic, scales = "free_y", nrow=1) +
+    scale_x_reordered() +
+    labs(
+      title = "Top Terms per Topic",
+      subtitle=subtitle_str,
+      x = "Term",
+      y = "Beta (Topic-Word Probability)"
+      ) +
+    theme_minimal()+
+    theme(axis.text.x = element_blank(), 
+          axis.ticks.x=element_blank(),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank())+
+    coord_flip()
+  
+  return(plot)
+}
+```
+
+### Visualizations
+```{r}
+k=6
+
+#Positive Reviews
+posviz=viz(fit(pos_reviews, k), "For POSITIVE Reviews Only")
+#Negative Reviews
+negviz=viz(fit(neg_reviews, k), "For NEGATIVE Reviews Only")
+
+posviz/negviz
+```
+
+Looking back on this visualization, if I had known that I was going to struggle initially and have to manually divide the data into positive and negative label groups, I likely would not have used Topic Modeling with LDA, and would have tried something else such as feature learning or partial dependence. Though, I was able to learn a lot about the complexity of the problem through my failed attempts.
+
+Either way, I was able to find commonly occurring words for both positive and negative reviews, as well as subgroups for each which might clue in to different situations where someone might leave a negative review. For example, negative topic 3 has the words: waste, version, stupid, and update, which might clue in to the fact that one of the main reasons someone might leave a negative review is because of a problematic update release. Or we could look at negative topic 4, which seems to suggest monetary concerns because of terms like money, buy and worth. 
+
+Overall, this type of analysis is useful for companies to look at to understand what they are doing well and what situations might cause frustration in their consumer base. 
+
